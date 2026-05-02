@@ -14,6 +14,8 @@ type Props = {
   optimisticUser: { content: string } | null;
   draftItems: DraftItem[];
   isStreaming: boolean;
+  onConfirmAction?: (actionId: string) => void;
+  onCancelAction?: (actionId: string) => void;
 };
 
 export function MessageList({
@@ -21,6 +23,8 @@ export function MessageList({
   optimisticUser,
   draftItems,
   isStreaming,
+  onConfirmAction,
+  onCancelAction,
 }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -60,7 +64,12 @@ export function MessageList({
             content={item.text}
           />
         ) : (
-          <ToolCallCard key={`draft-tool-${item.call.id}`} call={item.call} />
+          <ToolCallCard
+            key={`draft-tool-${item.call.id}`}
+            call={item.call}
+            onConfirm={onConfirmAction}
+            onCancel={onCancelAction}
+          />
         ),
       )}
       {showTypingPlaceholder ? (

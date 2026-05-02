@@ -85,6 +85,16 @@ export type ChatStreamEvent =
   | { type: "error"; data: { message: string } }
   | { type: "handover_active"; data: { status: string; message: string } }
   | {
+      type: "tool_confirmation_required";
+      data: {
+        actionId: string;
+        toolName: string;
+        args: unknown;
+        status: "pending";
+        expiresAt: string;
+      };
+    }
+  | {
       type: "done";
       data: {
         steps: number;
@@ -103,7 +113,38 @@ export type ChatStreamEvent =
 // /api/v1/sessions/events/stream 的 SSE 事件
 export type SessionStreamEvent =
   | { type: "message"; data: Message }
-  | { type: "heartbeat"; data: { ts: number } };
+  | { type: "heartbeat"; data: { ts: number } }
+  | { type: "pending_action"; data: PendingToolAction }
+  | { type: "tool_action_confirmed"; data: PendingToolAction }
+  | { type: "tool_action_cancelled"; data: PendingToolAction };
+
+export type ToolActionStatus =
+  | "pending"
+  | "confirmed"
+  | "cancelled"
+  | "expired";
+
+export type PendingToolAction = {
+  id: string;
+  sessionId: string;
+  visitorId?: string;
+  toolName: string;
+  args: unknown;
+  status: ToolActionStatus;
+  idempotencyKey?: string;
+  result?: {
+    ok?: boolean;
+    data?: unknown;
+    display?: string | null;
+    error?: string;
+  } | null;
+  error?: string;
+  expiresAt: string;
+  confirmedAt?: string | null;
+  cancelledAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 
 // 通用：解析后还没分发到具体 union 的中间形态
 export type RawSseFrame = {
