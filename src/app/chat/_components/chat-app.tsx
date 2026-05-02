@@ -4,20 +4,24 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useReducer, useRef } from "react";
 import { streamChat } from "~/lib/api/chat-stream";
 import { clearCurrentSessionId, readCurrentSessionId } from "~/lib/api/session";
+import { subscribeSessionEvents } from "~/lib/api/session-events";
 import { qk } from "~/lib/query/keys";
 import {
+  useAppendMessages,
   useCreateSession,
   useMessages,
   useSession,
   useVisitor,
 } from "~/lib/query/hooks";
-import type { ChatStreamEvent } from "~/lib/types/api";
+import type { ChatStreamEvent, SessionStatus } from "~/lib/types/api";
 import { Composer } from "./composer";
-import { MessageList } from "./message-list";
+import { HandoverBanner } from "./handover-banner";
+import { MessageList, type DraftItem } from "./message-list";
+import type { ToolCallView } from "./tool-call-card";
 
 type StreamState = {
   status: "idle" | "streaming" | "error";
-  draft: string;
+  draftItems: DraftItem[];
   optimisticUser: { content: string } | null;
   error: string | null;
 };
@@ -25,28 +29,94 @@ type StreamState = {
 type Action =
   | { type: "send"; content: string }
   | { type: "delta"; text: string }
+  | { type: "tool_start"; id: string; name: string }
+  | { type: "tool_running"; id: string; name: string; args: unknown }
+  | {
+      type: "tool_succeeded";
+      id: string;
+      display: string | null;
+      latencyMs: number;
+    }
+  | { type: "tool_failed"; id: string; error: string; latencyMs: number }
   | { type: "done" }
   | { type: "error"; message: string }
   | { type: "reset" };
 
 const initial: StreamState = {
   status: "idle",
-  draft: "",
+  draftItems: [],
   optimisticUser: null,
   error: null,
 };
+
+function pushDelta(items: DraftItem[], text: string): DraftItem[] {
+  const last = items[items.length - 1];
+  if (last?.kind === "text") {
+    return [...items.slice(0, -1), { kind: "text", text: last.text + text }];
+  }
+  return [...items, { kind: "text", text }];
+}
+
+function patchTool(
+  items: DraftItem[],
+  id: string,
+  patch: Partial<ToolCallView>,
+): DraftItem[] {
+  return items.map((item) =>
+    item.kind === "tool" && item.call.id === id
+      ? { kind: "tool", call: { ...item.call, ...patch } }
+      : item,
+  );
+}
 
 function reducer(state: StreamState, action: Action): StreamState {
   switch (action.type) {
     case "send":
       return {
         status: "streaming",
-        draft: "",
+        draftItems: [],
         optimisticUser: { content: action.content },
         error: null,
       };
     case "delta":
-      return { ...state, draft: state.draft + action.text };
+      return { ...state, draftItems: pushDelta(state.draftItems, action.text) };
+    case "tool_start":
+      return {
+        ...state,
+        draftItems: [
+          ...state.draftItems,
+          {
+            kind: "tool",
+            call: { id: action.id, name: action.name, status: "started" },
+          },
+        ],
+      };
+    case "tool_running":
+      return {
+        ...state,
+        draftItems: patchTool(state.draftItems, action.id, {
+          name: action.name,
+          status: "running",
+        }),
+      };
+    case "tool_succeeded":
+      return {
+        ...state,
+        draftItems: patchTool(state.draftItems, action.id, {
+          status: "succeeded",
+          display: action.display,
+          latencyMs: action.latencyMs,
+        }),
+      };
+    case "tool_failed":
+      return {
+        ...state,
+        draftItems: patchTool(state.draftItems, action.id, {
+          status: "failed",
+          error: action.error,
+          latencyMs: action.latencyMs,
+        }),
+      };
     case "done":
       return initial;
     case "error":
@@ -56,6 +126,8 @@ function reducer(state: StreamState, action: Action): StreamState {
   }
 }
 
+const HANDOVER_STATES: SessionStatus[] = ["pending_human", "assigned"];
+
 export function ChatApp() {
   const qc = useQueryClient();
   const [state, dispatch] = useReducer(reducer, initial);
@@ -64,15 +136,38 @@ export function ChatApp() {
   const visitor = useVisitor();
   const token = visitor.data?.token;
 
-  // 选定当前 sessionId：localStorage 优先；没有就走 createSession mutation
   const currentSessionId = useCurrentSessionId(token);
   const session = useSession(token, currentSessionId);
   const messagesQuery = useMessages(token, currentSessionId);
+  const appendMessages = useAppendMessages();
 
-  // 卸载时取消 in-flight stream
+  const sessionStatus = session.data?.session.status ?? null;
+  const isHandover = sessionStatus
+    ? HANDOVER_STATES.includes(sessionStatus)
+    : false;
+
+  // 卸载时取消 in-flight chat stream
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
+
+  // 处于人工接管态时订阅 session events，断线指数退避重连
+  useEffect(() => {
+    if (!token || !currentSessionId || !isHandover) return;
+    const ctrl = new AbortController();
+    const messages = messagesQuery.data ?? [];
+    const lastId = messages[messages.length - 1]?.id;
+    void subscribeSessionEvents({
+      token,
+      sessionId: currentSessionId,
+      sinceMessageId: lastId,
+      signal: ctrl.signal,
+      onMessage: (msg) => appendMessages(currentSessionId, [msg]),
+    });
+    return () => ctrl.abort();
+    // messagesQuery.data 变化不重启订阅 —— 只用初始值定 sinceMessageId
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, currentSessionId, isHandover]);
 
   const onSend = async (content: string) => {
     if (!token || !currentSessionId) return;
@@ -89,18 +184,64 @@ export function ChatApp() {
         content,
         signal: ctrl.signal,
         onEvent: (evt: ChatStreamEvent) => {
-          if (evt.type === "delta") {
-            dispatch({ type: "delta", text: evt.data.text });
-          } else if (evt.type === "error") {
-            dispatch({ type: "error", message: evt.data.message });
-          } else if (evt.type === "done") {
-            // 拉一次最新历史，让缓存与服务端对齐；reducer 紧跟着 reset
-            void qc.invalidateQueries({
-              queryKey: qk.messages(currentSessionId),
-            });
-            dispatch({ type: "done" });
+          switch (evt.type) {
+            case "delta":
+              dispatch({ type: "delta", text: evt.data.text });
+              break;
+            case "tool_call_start":
+              dispatch({
+                type: "tool_start",
+                id: evt.data.id,
+                name: evt.data.name,
+              });
+              break;
+            case "tool_call":
+              dispatch({
+                type: "tool_running",
+                id: evt.data.id,
+                name: evt.data.name,
+                args: evt.data.args,
+              });
+              break;
+            case "tool_result":
+              dispatch({
+                type: "tool_succeeded",
+                id: evt.data.id,
+                display: evt.data.display,
+                latencyMs: evt.data.latencyMs,
+              });
+              break;
+            case "tool_error":
+              dispatch({
+                type: "tool_failed",
+                id: evt.data.id,
+                error: evt.data.error,
+                latencyMs: evt.data.latencyMs,
+              });
+              break;
+            case "error":
+              dispatch({ type: "error", message: evt.data.message });
+              break;
+            case "handover_active":
+              // session 入口直接判定为已转人工 —— 后端不再调 LLM
+              void qc.invalidateQueries({
+                queryKey: qk.session(currentSessionId),
+              });
+              dispatch({ type: "done" });
+              break;
+            case "done":
+              if (evt.data.stopReason === "handover") {
+                void qc.invalidateQueries({
+                  queryKey: qk.session(currentSessionId),
+                });
+              }
+              void qc.invalidateQueries({
+                queryKey: qk.messages(currentSessionId),
+              });
+              dispatch({ type: "done" });
+              break;
+            // meta / step —— 暂不处理
           }
-          // tool_* / step / handover_active / meta —— PR3 处理
         },
       });
     } catch (err) {
@@ -112,6 +253,7 @@ export function ChatApp() {
   const isBootstrapping =
     visitor.isLoading || !currentSessionId || messagesQuery.isLoading;
   const isStreaming = state.status === "streaming";
+  const isClosed = sessionStatus === "closed";
 
   return (
     <>
@@ -119,12 +261,20 @@ export function ChatApp() {
         <div className="mx-auto flex max-w-3xl items-center justify-between">
           <h1 className="text-base font-semibold text-zinc-900">AI 客服</h1>
           <span className="text-xs text-zinc-500">
-            {session.data?.session.status === "open"
+            {sessionStatus === "open"
               ? "在线"
-              : (session.data?.session.status ?? "")}
+              : sessionStatus === "pending_human"
+                ? "等待人工"
+                : sessionStatus === "assigned"
+                  ? "人工接管中"
+                  : sessionStatus === "closed"
+                    ? "会话已关闭"
+                    : ""}
           </span>
         </div>
       </header>
+
+      {isHandover ? <HandoverBanner /> : null}
 
       {state.error ? (
         <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-center text-xs text-rose-700">
@@ -148,26 +298,27 @@ export function ChatApp() {
           <MessageList
             messages={messagesQuery.data ?? []}
             optimisticUser={state.optimisticUser}
-            assistantDraft={isStreaming ? state.draft : null}
+            draftItems={state.draftItems}
             isStreaming={isStreaming}
           />
         )}
       </div>
 
       <Composer
-        disabled={!token || !currentSessionId || isStreaming}
+        disabled={
+          !token || !currentSessionId || isStreaming || isHandover || isClosed
+        }
         onSend={onSend}
       />
     </>
   );
 }
 
-// 解决 "首次进页没有 sessionId 时自动建一个，建好后稳定下来" 这件事
+// 首次进页没有 sessionId 时自动建一个，建好后稳定下来
 function useCurrentSessionId(token: string | undefined): string | null {
   const create = useCreateSession(token);
   const ranRef = useRef(false);
 
-  // 客户端挂载后先读 localStorage 里的旧 sessionId
   const stored = typeof window === "undefined" ? null : readCurrentSessionId();
 
   useEffect(() => {
@@ -175,18 +326,15 @@ function useCurrentSessionId(token: string | undefined): string | null {
     ranRef.current = true;
     create.mutate(undefined, {
       onError: () => {
-        ranRef.current = false; // 失败允许下一次重试
+        ranRef.current = false;
       },
     });
-    // create.mutate / create.isPending 引用稳定，不入依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, stored]);
 
-  // 失效的 sessionId（404）由调用方决定是否清；MVP 不处理
   return stored ?? create.data?.id ?? null;
 }
 
-// 暴露给将来"重置会话"功能用
 export function resetChatSession() {
   clearCurrentSessionId();
 }

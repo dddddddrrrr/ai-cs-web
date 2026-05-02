@@ -3,30 +3,35 @@
 import { useEffect, useRef } from "react";
 import type { Message } from "~/lib/types/api";
 import { MessageBubble } from "./message-bubble";
+import { ToolCallCard, type ToolCallView } from "./tool-call-card";
+
+export type DraftItem =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; call: ToolCallView };
 
 type Props = {
   messages: Message[];
   optimisticUser: { content: string } | null;
-  assistantDraft: string | null;
+  draftItems: DraftItem[];
   isStreaming: boolean;
 };
 
 export function MessageList({
   messages,
   optimisticUser,
-  assistantDraft,
+  draftItems,
   isStreaming,
 }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length, assistantDraft, optimisticUser?.content]);
+  }, [messages.length, draftItems.length, optimisticUser?.content]);
 
   if (
     messages.length === 0 &&
     !optimisticUser &&
-    !assistantDraft &&
+    draftItems.length === 0 &&
     !isStreaming
   ) {
     return (
@@ -36,6 +41,9 @@ export function MessageList({
     );
   }
 
+  // 流式中没有任何 draft item 时，给个 typing 占位
+  const showTypingPlaceholder = isStreaming && draftItems.length === 0;
+
   return (
     <div className="flex flex-col gap-4 px-4 py-6">
       {messages.map((m) => (
@@ -44,12 +52,19 @@ export function MessageList({
       {optimisticUser ? (
         <MessageBubble role="user" content={optimisticUser.content} />
       ) : null}
-      {assistantDraft !== null || isStreaming ? (
-        <MessageBubble
-          role="assistant"
-          content={assistantDraft ?? ""}
-          pending={isStreaming && !assistantDraft}
-        />
+      {draftItems.map((item, idx) =>
+        item.kind === "text" ? (
+          <MessageBubble
+            key={`draft-text-${idx}`}
+            role="assistant"
+            content={item.text}
+          />
+        ) : (
+          <ToolCallCard key={`draft-tool-${item.call.id}`} call={item.call} />
+        ),
+      )}
+      {showTypingPlaceholder ? (
+        <MessageBubble role="assistant" content="" pending />
       ) : null}
       <div ref={endRef} />
     </div>
