@@ -1,10 +1,16 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
+import { ApiError } from "~/lib/api/client";
 import { streamChat } from "~/lib/api/chat-stream";
 import { clearCurrentSessionId, readCurrentSessionId } from "~/lib/api/session";
 import { subscribeSessionEvents } from "~/lib/api/session-events";
+import {
+  cancelToolAction,
+  confirmToolAction,
+  newIdempotencyKey,
+} from "~/lib/api/tool-action";
 import { qk } from "~/lib/query/keys";
 import {
   useAppendMessages,
@@ -13,11 +19,15 @@ import {
   useSession,
   useVisitor,
 } from "~/lib/query/hooks";
-import type { ChatStreamEvent, SessionStatus } from "~/lib/types/api";
+import type {
+  ChatStreamEvent,
+  PendingToolAction,
+  SessionStatus,
+} from "~/lib/types/api";
 import { Composer } from "./composer";
 import { HandoverBanner } from "./handover-banner";
 import { MessageList, type DraftItem } from "./message-list";
-import type { ToolCallView } from "./tool-call-card";
+import type { PendingActionView, ToolCallView } from "./tool-call-card";
 
 type StreamState = {
   status: "idle" | "streaming" | "error";
@@ -38,6 +48,17 @@ type Action =
       latencyMs: number;
     }
   | { type: "tool_failed"; id: string; error: string; latencyMs: number }
+  | {
+      type: "attach_pending";
+      toolName: string;
+      actionId: string;
+      args: unknown;
+      expiresAt: string;
+    }
+  | { type: "action_in_flight"; actionId: string; kind: "confirm" | "cancel" }
+  | { type: "action_resolved"; actionId: string; action: PendingToolAction }
+  | { type: "action_expired"; actionId: string }
+  | { type: "action_failed"; actionId: string; error: string }
   | { type: "done" }
   | { type: "error"; message: string }
   | { type: "reset" };
@@ -67,6 +88,74 @@ function patchTool(
       ? { kind: "tool", call: { ...item.call, ...patch } }
       : item,
   );
+}
+
+// 把待人审标记附到最近一个匹配 toolName 且尚未挂 pendingAction 的 tool 项上。
+function attachPending(
+  items: DraftItem[],
+  toolName: string,
+  pending: PendingActionView,
+  args: unknown,
+): DraftItem[] {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (
+      it?.kind === "tool" &&
+      it.call.name === toolName &&
+      !it.call.pendingAction
+    ) {
+      const next = items.slice();
+      next[i] = {
+        kind: "tool",
+        call: { ...it.call, args, pendingAction: pending },
+      };
+      return next;
+    }
+  }
+  return items;
+}
+
+function patchPendingByActionId(
+  items: DraftItem[],
+  actionId: string,
+  patch: Partial<PendingActionView>,
+): DraftItem[] {
+  return items.map((item) => {
+    if (
+      item.kind !== "tool" ||
+      item.call.pendingAction?.actionId !== actionId
+    ) {
+      return item;
+    }
+    return {
+      kind: "tool",
+      call: {
+        ...item.call,
+        pendingAction: { ...item.call.pendingAction, ...patch },
+      },
+    };
+  });
+}
+
+function viewFromAction(action: PendingToolAction): PendingActionView {
+  const result = action.result ?? null;
+  let uiStatus: PendingActionView["uiStatus"];
+  if (action.status === "confirmed") {
+    uiStatus = result?.ok === false ? "failed" : "confirmed";
+  } else if (action.status === "cancelled") {
+    uiStatus = "cancelled";
+  } else if (action.status === "expired") {
+    uiStatus = "expired";
+  } else {
+    uiStatus = "pending";
+  }
+  return {
+    actionId: action.id,
+    expiresAt: action.expiresAt,
+    uiStatus,
+    resultDisplay: result?.display ?? null,
+    resultError: result?.error ?? action.error,
+  };
 }
 
 function reducer(state: StreamState, action: Action): StreamState {
@@ -117,8 +206,61 @@ function reducer(state: StreamState, action: Action): StreamState {
           latencyMs: action.latencyMs,
         }),
       };
+    case "attach_pending":
+      return {
+        ...state,
+        draftItems: attachPending(
+          state.draftItems,
+          action.toolName,
+          {
+            actionId: action.actionId,
+            expiresAt: action.expiresAt,
+            uiStatus: "pending",
+          },
+          action.args,
+        ),
+      };
+    case "action_in_flight":
+      return {
+        ...state,
+        draftItems: patchPendingByActionId(state.draftItems, action.actionId, {
+          uiStatus: action.kind === "confirm" ? "confirming" : "cancelling",
+        }),
+      };
+    case "action_resolved":
+      return {
+        ...state,
+        draftItems: patchPendingByActionId(
+          state.draftItems,
+          action.actionId,
+          viewFromAction(action.action),
+        ),
+      };
+    case "action_expired":
+      return {
+        ...state,
+        draftItems: patchPendingByActionId(state.draftItems, action.actionId, {
+          uiStatus: "expired",
+        }),
+      };
+    case "action_failed":
+      return {
+        ...state,
+        draftItems: patchPendingByActionId(state.draftItems, action.actionId, {
+          uiStatus: "failed",
+          resultError: action.error,
+        }),
+      };
     case "done":
-      return initial;
+      // done 后只留待人审卡片：普通文本/工具结果会被 messages 缓存接管，留着会双显
+      return {
+        status: "idle",
+        optimisticUser: null,
+        error: null,
+        draftItems: state.draftItems.filter(
+          (it) => it.kind === "tool" && !!it.call.pendingAction,
+        ),
+      };
     case "error":
       return { ...state, status: "error", error: action.message };
     case "reset":
@@ -219,6 +361,15 @@ export function ChatApp() {
                 latencyMs: evt.data.latencyMs,
               });
               break;
+            case "tool_confirmation_required":
+              dispatch({
+                type: "attach_pending",
+                toolName: evt.data.toolName,
+                actionId: evt.data.actionId,
+                args: evt.data.args,
+                expiresAt: evt.data.expiresAt,
+              });
+              break;
             case "error":
               dispatch({ type: "error", message: evt.data.message });
               break;
@@ -249,6 +400,53 @@ export function ChatApp() {
       dispatch({ type: "error", message });
     }
   };
+
+  const idemKeysRef = useRef<Map<string, string>>(new Map());
+
+  const onConfirmAction = useCallback(
+    async (actionId: string) => {
+      if (!token) return;
+      let key = idemKeysRef.current.get(actionId);
+      if (!key) {
+        key = newIdempotencyKey();
+        idemKeysRef.current.set(actionId, key);
+      }
+      dispatch({ type: "action_in_flight", actionId, kind: "confirm" });
+      try {
+        const result = await confirmToolAction(token, actionId, key);
+        dispatch({ type: "action_resolved", actionId, action: result });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          const code =
+            err.body && typeof err.body === "object" && "code" in err.body
+              ? (err.body as { code?: string }).code
+              : undefined;
+          if (code === "tool_action_expired") {
+            dispatch({ type: "action_expired", actionId });
+            return;
+          }
+        }
+        const msg = err instanceof Error ? err.message : "请求失败";
+        dispatch({ type: "action_failed", actionId, error: msg });
+      }
+    },
+    [token],
+  );
+
+  const onCancelAction = useCallback(
+    async (actionId: string) => {
+      if (!token) return;
+      dispatch({ type: "action_in_flight", actionId, kind: "cancel" });
+      try {
+        const result = await cancelToolAction(token, actionId);
+        dispatch({ type: "action_resolved", actionId, action: result });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "请求失败";
+        dispatch({ type: "action_failed", actionId, error: msg });
+      }
+    },
+    [token],
+  );
 
   const isBootstrapping =
     visitor.isLoading || !currentSessionId || messagesQuery.isLoading;
@@ -300,6 +498,8 @@ export function ChatApp() {
             optimisticUser={state.optimisticUser}
             draftItems={state.draftItems}
             isStreaming={isStreaming}
+            onConfirmAction={onConfirmAction}
+            onCancelAction={onCancelAction}
           />
         )}
       </div>
