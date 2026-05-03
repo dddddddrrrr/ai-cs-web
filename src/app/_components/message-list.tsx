@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { Avatar, AvatarFallback } from "~/components/ui/avatar";
 import type { Message } from "~/lib/types/api";
 import { MessageBubble } from "./message-bubble";
 import { ToolCallCard, type ToolCallView } from "./tool-call-card";
@@ -39,8 +40,18 @@ export function MessageList({
     !isStreaming
   ) {
     return (
-      <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
-        你好，我是 AI 客服。请描述你的问题，我会尽力帮你处理。
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+        <Avatar size="lg" className="shadow-sm">
+          <AvatarFallback className="bg-gradient-to-br from-emerald-500 to-emerald-700 text-sm font-semibold text-white">
+            AI
+          </AvatarFallback>
+        </Avatar>
+        <div className="text-foreground text-base font-medium">
+          你好，有什么可以帮你的？
+        </div>
+        <div className="text-muted-foreground max-w-xs text-sm">
+          可以问订单状态、物流、退换货等问题
+        </div>
       </div>
     );
   }
