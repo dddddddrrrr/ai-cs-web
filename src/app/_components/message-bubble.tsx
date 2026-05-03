@@ -25,14 +25,16 @@ export function MessageBubble({
   const isAgent = role === "agent";
   const align = isUser ? "items-end" : "items-start";
   const bubble = isUser
-    ? "bg-emerald-600 text-white"
+    ? "bg-primary text-primary-foreground"
     : isAgent
       ? "border border-amber-300 bg-amber-50 text-zinc-900"
-      : "border border-zinc-200 bg-white text-zinc-900";
+      : "border bg-card text-card-foreground";
 
   return (
     <div className={`flex flex-col gap-1 ${align}`}>
-      <span className="px-1 text-xs text-zinc-500">{ROLE_LABEL[role]}</span>
+      <span className="text-muted-foreground px-1 text-xs">
+        {ROLE_LABEL[role]}
+      </span>
       <div
         className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${bubble}`}
       >

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Button } from "~/components/ui/button";
 
 export type PendingActionView = {
   actionId: string;
@@ -167,22 +168,25 @@ function PendingActionCard({
 
       {!isResolved ? (
         <div className="mt-3 flex items-center justify-end gap-2">
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={() => onCancel?.(pending.actionId)}
             disabled={isInFlight || !onCancel}
-            className="rounded-full border border-zinc-300 bg-white px-4 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="h-auto rounded-full border-zinc-300 px-4 py-1 text-xs font-medium text-zinc-700"
           >
             {status === "cancelling" ? "取消中…" : "取消"}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            size="sm"
             onClick={() => onConfirm?.(pending.actionId)}
             disabled={isInFlight || !onConfirm}
-            className="rounded-full bg-emerald-600 px-4 py-1 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="h-auto rounded-full px-4 py-1 text-xs font-medium"
           >
             {status === "confirming" ? "确认中…" : "确认执行"}
-          </button>
+          </Button>
         </div>
       ) : null}
     </div>

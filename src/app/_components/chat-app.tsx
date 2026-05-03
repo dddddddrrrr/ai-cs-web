@@ -24,6 +24,7 @@ import type {
   PendingToolAction,
   SessionStatus,
 } from "~/lib/types/api";
+import { Button } from "~/components/ui/button";
 import { Composer } from "./composer";
 import { HandoverBanner } from "./handover-banner";
 import { MessageList, type DraftItem } from "./message-list";
@@ -455,20 +456,29 @@ export function ChatApp() {
 
   return (
     <>
-      <header className="border-b border-zinc-200 bg-white px-4 py-3">
+      <header className="border-border bg-background border-b px-4 py-3">
         <div className="mx-auto flex max-w-3xl items-center justify-between">
-          <h1 className="text-base font-semibold text-zinc-900">AI 客服</h1>
-          <span className="text-xs text-zinc-500">
-            {sessionStatus === "open"
-              ? "在线"
-              : sessionStatus === "pending_human"
-                ? "等待人工"
-                : sessionStatus === "assigned"
-                  ? "人工接管中"
-                  : sessionStatus === "closed"
-                    ? "会话已关闭"
-                    : ""}
-          </span>
+          <h1 className="text-foreground text-base font-semibold">AI 客服</h1>
+          {sessionStatus ? (
+            <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+              <span
+                className={`size-1.5 rounded-full ${
+                  sessionStatus === "open"
+                    ? "animate-pulse bg-emerald-500"
+                    : sessionStatus === "closed"
+                      ? "bg-zinc-400"
+                      : "bg-amber-500"
+                }`}
+              />
+              {sessionStatus === "open"
+                ? "在线"
+                : sessionStatus === "pending_human"
+                  ? "等待人工"
+                  : sessionStatus === "assigned"
+                    ? "人工接管中"
+                    : "会话已关闭"}
+            </span>
+          ) : null}
         </div>
       </header>
 
@@ -477,20 +487,26 @@ export function ChatApp() {
       {state.error ? (
         <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-center text-xs text-rose-700">
           {state.error}
-          <button
+          <Button
             type="button"
+            variant="link"
             onClick={() => dispatch({ type: "reset" })}
-            className="ml-2 underline"
+            className="ml-2 h-auto p-0 align-baseline text-xs text-rose-700 underline underline-offset-2"
           >
             关闭
-          </button>
+          </Button>
         </div>
       ) : null}
 
       <div className="mx-auto w-full max-w-3xl flex-1 overflow-y-auto">
         {isBootstrapping ? (
-          <div className="flex h-full items-center justify-center text-sm text-zinc-500">
-            正在连接客服…
+          <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-3 text-sm">
+            <span className="flex gap-1">
+              <span className="size-1.5 animate-bounce rounded-full bg-emerald-500 [animation-delay:-0.3s]" />
+              <span className="size-1.5 animate-bounce rounded-full bg-emerald-500 [animation-delay:-0.15s]" />
+              <span className="size-1.5 animate-bounce rounded-full bg-emerald-500" />
+            </span>
+            <span>正在连接客服</span>
           </div>
         ) : (
           <MessageList
